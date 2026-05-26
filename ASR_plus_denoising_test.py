@@ -185,31 +185,57 @@ import threading
 import queue
 import time
 import os
+import platform
 from collections import deque, Counter
 from faster_whisper import WhisperModel
 
 # --- Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+def _env_flag(name, default=False):
+    value = os.environ.get(name, "").strip().lower()
+    if not value:
+        return default
+    return value in ("1", "true", "yes", "on")
+
+# Pi / edge profile: lighter inference cadence, higher stream latency, native ALSA rates.
+IS_PI_PROFILE = _env_flag("LANGFILTER_PI") or (
+    platform.system() == "Linux"
+    and os.path.exists("/proc/device-tree/model")
+    and "raspberry pi" in open("/proc/device-tree/model", "rb").read().decode("utf-8", "ignore").lower()
+)
+
 TARGET_LANGUAGE = "en"
-SAMPLE_RATE = 16000
-BLOCK_DURATION_MS = 30               # small frame for I/O
-BLOCK_SAMPLES = int(SAMPLE_RATE * BLOCK_DURATION_MS / 1000)
-DETECTION_INTERVAL = 0.5            # seconds between detection
-BUFFER_DURATION_S = 1.5             # accumulate 1s of audio
+WHISPER_SAMPLE_RATE = 16000
+# Full-duplex stream rate — negotiated with hardware (Pi headphone jack prefers 44100/48000).
+STREAM_SAMPLE_RATE = int(os.environ.get("AUDIO_SAMPLE_RATE", "48000" if IS_PI_PROFILE else "16000"))
+BLOCK_DURATION_MS = 30 if not IS_PI_PROFILE else 40
+BLOCK_SAMPLES = int(STREAM_SAMPLE_RATE * BLOCK_DURATION_MS / 1000)
+DETECTION_INTERVAL = 0.75 if IS_PI_PROFILE else 0.5
+BUFFER_DURATION_S = 2.5 if IS_PI_PROFILE else 3.5
 BUFFER_FRAMES = int(BUFFER_DURATION_S * 1000 / BLOCK_DURATION_MS)
-CONFIDENCE_THRESHOLD = 0.4       # for PLAY/MUTE decision
-VOTE_CONFIDENCE_MIN  = 0.25      # minimum conf to count a vote (lower = more responsive to non-English)
-ENGLISH_VOTE_CONFIDENCE_MIN = 0.35  # Whisper often over-picks English on weak/ambiguous speech
-MIN_SPEECH_RMS = 0.003          # skip silence/noise so it cannot become a language vote
-MIN_LANGUAGE_MARGIN = 0.05      # reject close language guesses as unstable
-TARGET_SUPPORT_MIN = 0.30       # smoothed vote share required before audio is opened
-CONTRADICT_CONFIDENCE = 0.70    # immediately close audio on strong non-target detections
-HISTORY_WINDOW = 7               # last N detections for voting (~2.5s at 0.5s intervals)
-INPUT_DEVICE = os.environ.get("AUDIO_INPUT_DEVICE")  # optional device index/name override
+CONFIDENCE_THRESHOLD = 0.45
+VOTE_CONFIDENCE_MIN = 0.25
+ENGLISH_VOTE_CONFIDENCE_MIN = 0.50 if IS_PI_PROFILE else 0.40
+MIN_SPEECH_RMS = 0.003
+MIN_LANGUAGE_MARGIN = 0.08 if IS_PI_PROFILE else 0.05
+ENGLISH_MIN_MARGIN = 0.12
+TARGET_SUPPORT_MIN = 0.35
+CONTRADICT_CONFIDENCE = 0.65
+HISTORY_WINDOW = 6
+WHISPER_BEAM_SIZE = 1 if IS_PI_PROFILE else 3
+WHISPER_BEST_OF = 1 if IS_PI_PROFILE else 3
+USE_VAD = False
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "tiny" if IS_PI_PROFILE else "base")
+WHISPER_COMPUTE = os.environ.get("WHISPER_COMPUTE", "int8" if IS_PI_PROFILE else "float32")
+STREAM_LATENCY = os.environ.get("AUDIO_LATENCY", "high" if IS_PI_PROFILE else "low")
+INPUT_DEVICE = os.environ.get("AUDIO_INPUT_DEVICE")
+OUTPUT_DEVICE = os.environ.get("AUDIO_OUTPUT_DEVICE")
+OUTPUT_QUEUE_SIZE = 200 if IS_PI_PROFILE else 100
 
 # --- Queues and State ---
 audio_input_q = queue.Queue(maxsize=100)
-audio_output_q = queue.Queue(maxsize=100)
+audio_output_q = queue.Queue(maxsize=OUTPUT_QUEUE_SIZE)
 detection_q   = queue.Queue(maxsize=50)
 
 state_lock = threading.Lock()
@@ -227,6 +253,8 @@ latest_status = {
     "raw_language": "unknown",   # latest single detection (before voting)
     "raw_confidence": 0.0,
     "language_support": 0.0,
+    "stream_sample_rate": STREAM_SAMPLE_RATE,
+    "pi_profile": IS_PI_PROFILE,
 }
 
 # --- Model Initialization ---
@@ -234,9 +262,12 @@ model = None
 
 def load_model():
     global model
-    logging.info("Loading faster-whisper model (tiny/base-int8)...")
-    #model = WhisperModel("base", device="cpu", compute_type="int8")
-    model = WhisperModel("tiny", device="cpu", compute_type="int8")
+    logging.info(
+        "Loading faster-whisper model (%s, cpu, %s)...",
+        WHISPER_MODEL,
+        WHISPER_COMPUTE,
+    )
+    model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type=WHISPER_COMPUTE)
     logging.info("Model loaded.")
 
 # --- Target Language Setter (called from server.py) ---
@@ -264,6 +295,126 @@ def _language_margin(info, fallback_conf):
 
     values.sort(reverse=True)
     return values[0] - values[1]
+
+def _top_language_codes(info, limit=5):
+    probs = getattr(info, "all_language_probs", None)
+    if not probs:
+        return []
+
+    ranked = []
+    for item in probs:
+        if isinstance(item, tuple) and len(item) >= 2:
+            ranked.append((str(item[0]), float(item[1])))
+        elif hasattr(item, "language") and hasattr(item, "probability"):
+            ranked.append((str(item.language), float(item.probability)))
+
+    ranked.sort(key=lambda pair: pair[1], reverse=True)
+    return ranked[:limit]
+
+def _english_ambiguity_reject(info, lang, conf, margin):
+    """Whisper base/tiny often over-picks English on Hindi/Japanese chunks."""
+    if lang != "en":
+        return False
+
+    required_margin = ENGLISH_MIN_MARGIN
+    if margin < required_margin:
+        return True
+
+    ranked = _top_language_codes(info)
+    if len(ranked) < 2:
+        return conf < ENGLISH_VOTE_CONFIDENCE_MIN
+
+    second_lang, second_conf = ranked[1]
+    # If a non-English language is close behind, treat English as unreliable.
+    if second_lang != "en" and (conf - second_conf) < required_margin:
+        return True
+
+    return conf < ENGLISH_VOTE_CONFIDENCE_MIN
+
+def _resample_audio(audio, source_rate, target_rate):
+    if source_rate == target_rate:
+        return audio.astype(np.float32, copy=False)
+
+    if len(audio) == 0:
+        return audio.astype(np.float32, copy=False)
+
+    target_len = max(1, int(round(len(audio) * target_rate / source_rate)))
+    source_idx = np.linspace(0, len(audio) - 1, num=target_len, dtype=np.float32)
+    return np.interp(source_idx, np.arange(len(audio), dtype=np.float32), audio).astype(np.float32)
+
+def _resolve_device(devices, override, want_input):
+    if override:
+        try:
+            return int(override)
+        except ValueError:
+            wanted = override.lower()
+            hints = [wanted]
+            if "headphone" in wanted or "bcm2835" in wanted:
+                hints.extend(["bcm2835", "headphones", "headphone"])
+
+            for hint in hints:
+                for idx, device in enumerate(devices):
+                    name = device["name"].lower()
+                    channel_ok = (
+                        device["max_input_channels"] > 0
+                        if want_input
+                        else device["max_output_channels"] > 0
+                    )
+                    if hint in name and channel_ok:
+                        return idx
+            raise RuntimeError(f"Audio device not found: {override}")
+
+    default_idx = sd.default.device[0 if want_input else 1]
+    if default_idx is not None and default_idx >= 0:
+        device = sd.query_devices(default_idx)
+        channel_ok = (
+            device["max_input_channels"] > 0
+            if want_input
+            else device["max_output_channels"] > 0
+        )
+        if channel_ok:
+            return default_idx
+
+    for idx, device in enumerate(devices):
+        channel_ok = (
+            device["max_input_channels"] > 0
+            if want_input
+            else device["max_output_channels"] > 0
+        )
+        if channel_ok:
+            return idx
+
+    direction = "input" if want_input else "output"
+    raise RuntimeError(f"No {direction} audio device was found.")
+
+def _negotiate_sample_rate(input_device, output_device, input_channels, output_channels):
+    candidates = []
+    preferred = STREAM_SAMPLE_RATE
+    for rate in (preferred, 48000, 44100, 32000, 16000, 22050):
+        if rate not in candidates:
+            candidates.append(rate)
+
+    for rate in candidates:
+        try:
+            sd.check_input_settings(
+                device=input_device,
+                channels=input_channels,
+                samplerate=rate,
+                dtype="float32",
+            )
+            sd.check_output_settings(
+                device=output_device,
+                channels=output_channels,
+                samplerate=rate,
+                dtype="float32",
+            )
+            return rate
+        except Exception:
+            continue
+
+    raise RuntimeError(
+        "Could not find a sample rate supported by both input and output devices."
+    )
 
 def _vote_language():
     scores = {}
@@ -298,41 +449,18 @@ def _should_play(target_lang, voted_lang, voted_conf, support, raw_lang, raw_con
     return True
 
 def _resolve_input_device(devices):
-    if INPUT_DEVICE:
-        try:
-            return int(INPUT_DEVICE)
-        except ValueError:
-            wanted = INPUT_DEVICE.lower()
-            for idx, device in enumerate(devices):
-                if wanted in device["name"].lower() and device["max_input_channels"] > 0:
-                    return idx
-            raise RuntimeError(f"Input device not found: {INPUT_DEVICE}")
-
-    default_input = sd.default.device[0]
-    if default_input is not None and default_input >= 0:
-        device = sd.query_devices(default_input)
-        if device["max_input_channels"] > 0:
-            return default_input
-
-    for idx, device in enumerate(devices):
-        if device["max_input_channels"] > 0:
-            return idx
-
-    raise RuntimeError("No input audio device with input channels was found.")
+    return _resolve_device(devices, INPUT_DEVICE, want_input=True)
 
 def _resolve_output_device(devices):
-    '''default_output = sd.default.device[1]
-    if default_output is not None and default_output >= 0:
-        device = sd.query_devices(default_output)
-        if device["max_output_channels"] > 0:
-            return default_output
-
-    for idx, device in enumerate(devices):
-        if device["max_output_channels"] > 0:
-            return idx
-
-    raise RuntimeError("No output audio device with output channels was found.")'''
-    return 5
+    # Prefer Pi headphone jack when no override is set.
+    if IS_PI_PROFILE and not OUTPUT_DEVICE:
+        for idx, device in enumerate(devices):
+            name = device["name"].lower()
+            if device["max_output_channels"] > 0 and (
+                "bcm2835" in name or "headphones" in name or "headphone" in name
+            ):
+                return idx
+    return _resolve_device(devices, OUTPUT_DEVICE, want_input=False)
 
 def _stream_config():
     devices = sd.query_devices()
@@ -345,57 +473,60 @@ def _stream_config():
     output_channels = 1
 
     try:
-        sd.check_input_settings(
-            device=input_device,
-            channels=input_channels,
-            samplerate=SAMPLE_RATE,
-            dtype="float32",
-        )
-    except Exception as exc:
-        logging.warning(
-            f"Input device rejected {input_channels} channels; trying mono input. Reason: {exc}"
-        )
-        input_channels = 1
-        sd.check_input_settings(
-            device=input_device,
-            channels=input_channels,
-            samplerate=SAMPLE_RATE,
-            dtype="float32",
-        )
-
-    try:
         sd.check_output_settings(
             device=output_device,
             channels=output_channels,
-            samplerate=SAMPLE_RATE,
+            samplerate=STREAM_SAMPLE_RATE,
             dtype="float32",
         )
     except Exception as exc:
         output_channels = max(1, int(output_info["max_output_channels"]))
         logging.warning(
-            f"Output device rejected mono output; trying {output_channels} channels. Reason: {exc}"
-        )
-        sd.check_output_settings(
-            device=output_device,
-            channels=output_channels,
-            samplerate=SAMPLE_RATE,
-            dtype="float32",
+            "Output device rejected mono output; trying %d channels. Reason: %s",
+            output_channels,
+            exc,
         )
 
+    try:
+        sd.check_input_settings(
+            device=input_device,
+            channels=input_channels,
+            samplerate=STREAM_SAMPLE_RATE,
+            dtype="float32",
+        )
+    except Exception as exc:
+        logging.warning(
+            "Input device rejected %d channels; trying mono input. Reason: %s",
+            input_channels,
+            exc,
+        )
+        input_channels = 1
+
+    stream_rate = _negotiate_sample_rate(
+        input_device,
+        output_device,
+        input_channels,
+        output_channels,
+    )
+
     logging.info(
-        "Audio devices: input=%s (%s, channels=%d), output=%s (%s, channels=%d), samplerate=%d",
+        "Audio devices: input=%s (%s, ch=%d), output=%s (%s, ch=%d), "
+        "stream_rate=%d, whisper_rate=%d, pi_profile=%s",
         input_device,
         input_info["name"],
         input_channels,
         output_device,
         output_info["name"],
         output_channels,
-        SAMPLE_RATE,
+        stream_rate,
+        WHISPER_SAMPLE_RATE,
+        IS_PI_PROFILE,
     )
 
     return {
         "device": (input_device, output_device),
         "channels": (input_channels, output_channels),
+        "stream_sample_rate": stream_rate,
     }
 
 # --- Detection Worker ---
@@ -417,21 +548,27 @@ def detection_worker():
             try:
                 if audio_rms < MIN_SPEECH_RMS:
                     lang, conf, margin = "unknown", 0.0, 0.0
+                    info = None
                 else:
-                    # Whisper expects float32 normalized
-                    audio_f32 = audio.astype(np.float32)
+                    whisper_audio = _resample_audio(
+                        audio.astype(np.float32, copy=False),
+                        stream_sample_rate,
+                        WHISPER_SAMPLE_RATE,
+                    )
                     _, info = model.transcribe(
-                        audio_f32, language=None, beam_size=1,
+                        whisper_audio,
+                        language=None,
+                        beam_size=WHISPER_BEAM_SIZE,
+                        best_of=WHISPER_BEST_OF,
                         condition_on_previous_text=False,
-                        vad_filter=True,
-                        vad_parameters=dict(min_silence_duration_ms=300)
+                        vad_filter=USE_VAD,
                     )
                     lang = info.language or "unknown"
                     conf = float(info.language_probability or 0.0)
                     margin = _language_margin(info, conf)
             except Exception as e:
                 logging.warning(f"Detection error: {e}")
-                lang, conf, margin = "unknown", 0.0, 0.0
+                lang, conf, margin, info = "unknown", 0.0, 0.0, None
 
             with state_lock:
                 # Store raw detection (before voting)
@@ -439,7 +576,12 @@ def detection_worker():
                 latest_status["raw_confidence"] = float(conf)
 
                 vote_min = ENGLISH_VOTE_CONFIDENCE_MIN if lang == "en" else VOTE_CONFIDENCE_MIN
-                if conf < vote_min or margin < MIN_LANGUAGE_MARGIN:
+                reject = (
+                    conf < vote_min
+                    or margin < MIN_LANGUAGE_MARGIN
+                    or (info is not None and _english_ambiguity_reject(info, lang, conf, margin))
+                )
+                if reject:
                     history.append(("unk", 0.0))
                 else:
                     history.append((lang, conf))
@@ -529,10 +671,19 @@ def audio_callback(indata, outdata, frames, time_info, status):
         outdata.fill(0)
 
 # --- Main ---
+stream_sample_rate = STREAM_SAMPLE_RATE
+
 def main():
-    global running
+    global running, stream_sample_rate
     load_model()
     stream_config = _stream_config()
+    stream_sample_rate = stream_config["stream_sample_rate"]
+    block_samples = int(stream_sample_rate * BLOCK_DURATION_MS / 1000)
+
+    with state_lock:
+        latest_status["stream_sample_rate"] = stream_sample_rate
+        latest_status["pi_profile"] = IS_PI_PROFILE
+
     # start workers
     det_t = threading.Thread(target=detection_worker, daemon=True)
     rout_t = threading.Thread(target=routing_worker, daemon=True)
@@ -541,12 +692,12 @@ def main():
 
     logging.info("Starting audio stream. Speak now...")
     with sd.Stream(
-        samplerate=SAMPLE_RATE,
-        blocksize=BLOCK_SAMPLES,
+        samplerate=stream_sample_rate,
+        blocksize=block_samples,
         channels=stream_config["channels"],
         dtype='float32',
         callback=audio_callback,
-        latency='low',
+        latency=STREAM_LATENCY,
         device=stream_config["device"],
     ):
         try:

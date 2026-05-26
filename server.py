@@ -71,8 +71,11 @@ def config():
         return jsonify({
             "target_language": backend.TARGET_LANGUAGE,
             "confidence_threshold": backend.CONFIDENCE_THRESHOLD,
-            "sample_rate": backend.SAMPLE_RATE,
+            "sample_rate": backend.stream_sample_rate,
+            "whisper_sample_rate": backend.WHISPER_SAMPLE_RATE,
             "detection_interval": backend.DETECTION_INTERVAL,
+            "pi_profile": backend.IS_PI_PROFILE,
+            "buffer_duration_s": backend.BUFFER_DURATION_S,
         })
 
 # --- Serve Frontend ---
