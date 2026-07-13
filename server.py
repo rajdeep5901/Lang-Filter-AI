@@ -81,6 +81,10 @@ def config():
 def serve_index():
     return send_from_directory(STATIC_DIR, "index.html")
 
+@app.route("/dashboard")
+def serve_dashboard():
+    return send_from_directory(STATIC_DIR, "dashboard.html")
+
 @app.route("/<path:filename>")
 def serve_static(filename):
     return send_from_directory(STATIC_DIR, filename)

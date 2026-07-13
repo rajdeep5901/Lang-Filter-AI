@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LangFilterAI — Real-Time Language-Based Audio Filter</title>
+    <meta name="description" content="AI-powered real-time language detection and audio filtering dashboard">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+    <header class="header">
+        <div class="header-left">
+            <div class="logo-icon" id="logoIcon">🎙</div>
+            <div class="logo-text">
+                <h1>LangFilter<span class="accent">AI</span></h1>
+                <p class="subtitle">Real-Time Language-Based Audio Filter</p>
+            </div>
+        </div>
+        <div class="header-right">
+            <div class="system-status" id="connStatus"><div class="status-dot" id="sysDot"></div><span id="sysText">Connecting...</span></div>
+            <div class="badge-live">LIVE</div>
+            <div class="clock" id="clock">00:00:00</div>
+        </div>
+    </header>
+
+    <main class="dashboard">
+        <!-- Row 1 -->
+        <div class="row row-top">
+            <div class="card card-wave">
+                <div class="card-head"><span class="card-title">⚡ Live Audio Waveform</span><span class="badge-live">LIVE</span></div>
+                <canvas id="waveCanvas"></canvas>
+            </div>
+            <div class="card card-mic">
+                <div class="mic-wrap">
+                    <div class="mic-pulse p1"></div>
+                    <div class="mic-pulse p2"></div>
+                    <div class="mic-pulse p3"></div>
+                    <div class="mic-core" id="micCore">🎤</div>
+                </div>
+                <p class="mic-label">Microphone Active</p>
+                <div class="mic-specs"><span>44.1 kHz</span><span>16-bit PCM</span></div>
+            </div>
+        </div>
+
+        <!-- Row 2 -->
+        <div class="row row-mid">
+            <div class="card card-lang">
+                <div class="card-head"><span class="card-title">🌐 Detected Language</span></div>
+                <div class="lang-display">
+                    <span class="lang-code" id="langCode">EN</span>
+                    <span class="lang-name" id="langName">English</span>
+                    <span class="lang-flag" id="langFlag">🇺🇸</span>
+                </div>
+            </div>
+            <div class="card card-conf">
+                <div class="card-head"><span class="card-title">📊 Confidence</span><span class="conf-val" id="confVal">82%</span></div>
+                <div class="conf-track"><div class="conf-fill" id="confFill"></div></div>
+                <div class="conf-labels"><span>0%</span><span>50%</span><span>100%</span></div>
+            </div>
+            <div class="card card-status" id="statusCard">
+                <div class="card-head"><span class="card-title">✅ Filter Status</span></div>
+                <div class="status-display">
+                    <div class="status-icon" id="statusIcon">✔</div>
+                    <div class="status-text" id="statusText">PASS</div>
+                    <div class="status-sub" id="statusSub">Audio forwarded</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Row 3 -->
+        <div class="row row-bot">
+            <div class="card card-vol">
+                <div class="card-head"><span class="card-title">🔊 Volume Level</span><span class="vol-val" id="volVal">75%</span></div>
+                <div class="vol-meter" id="volMeter"></div>
+                <div class="vol-labels"><span>Silent</span><span>Moderate</span><span>Loud</span></div>
+            </div>
+            <div class="card card-hist">
+                <div class="card-head"><span class="card-title">🕐 Detection History</span><span class="hist-count" id="histCount">0</span></div>
+                <div class="hist-timeline" id="histTimeline"></div>
+            </div>
+            <div class="card card-target">
+                <div class="card-head"><span class="card-title">⭐ Target Language</span></div>
+                <div class="target-body">
+                    <select id="targetLang" class="target-select">
+                        <option value="en" selected>🇺🇸 English (EN)</option>
+                        <option value="hi">🇮🇳 Hindi (HI)</option>
+                        <option value="or">🇮🇳 Odia (OR)</option>
+                        <option value="bn">🇮🇳 Bengali (BN)</option>
+                        <option value="ta">🇮🇳 Tamil (TA)</option>
+                        <option value="te">🇮🇳 Telugu (TE)</option>
+                        <option value="mr">🇮🇳 Marathi (MR)</option>
+                        <option value="gu">🇮🇳 Gujarati (GU)</option>
+                        <option value="es">🇪🇸 Spanish (ES)</option>
+                        <option value="fr">🇫🇷 French (FR)</option>
+                        <option value="de">🇩🇪 German (DE)</option>
+                        <option value="ja">🇯🇵 Japanese (JA)</option>
+                        <option value="zh">🇨🇳 Chinese (ZH)</option>
+                        <option value="ar">🇸🇦 Arabic (AR)</option>
+                    </select>
+                    <p class="target-hint">Matching audio → <strong>PLAY</strong> · Others → <strong>MUTE</strong></p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stats -->
+        <div class="row row-stats">
+            <div class="stat"><div class="stat-val" id="statRequests">0</div><div class="stat-lbl">API Requests</div></div>
+            <div class="stat"><div class="stat-val" id="statLatency">--</div><div class="stat-lbl">Avg Latency</div></div>
+            <div class="stat"><div class="stat-val" id="statSource">OFFLINE</div><div class="stat-lbl">Data Source</div></div>
+            <div class="stat"><div class="stat-val" id="statUptime">00:00</div><div class="stat-lbl">Uptime</div></div>
+        </div>
+    </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
