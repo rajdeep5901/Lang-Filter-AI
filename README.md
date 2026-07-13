@@ -62,10 +62,60 @@ A dedicated landing page now fronts the project, and the dashboard was refined i
 
 | Resource | URL | Notes |
 | --- | --- | --- |
-| Landing page | `https://langfilterai.example.com` *(placeholder)* | Fully static — deployable to any host. |
+| Landing page | `https://rajdeep5901.github.io/Lang-Filter-AI/` | Static landing page, hosted free on GitHub Pages. |
 | Dashboard | `http://localhost:5000/dashboard` | Requires the local Flask backend, a microphone, and the Whisper model. |
 
-The landing page is purely static and can be hosted anywhere. The dashboard is a live view of the detection backend, so it needs the Flask server running locally with microphone access — it cannot function as a hosted, backend-less demo.
+The landing page is purely static and is served from GitHub Pages (see the [Deployment Guide](#-deployment-guide) below). The dashboard is a live view of the detection backend, so it needs the Flask server running locally with microphone access — it cannot function as a hosted, backend-less demo.
+
+---
+
+## 🚢 Deployment Guide
+
+The landing page (`index.html` and its assets) is fully static, so it is deployed with **GitHub Pages** — GitHub's built-in static hosting. This is the recommended platform for this project: it is **free for public repositories with no hidden costs**, requires no separate account or build pipeline, and serves the site directly from the branch.
+
+### 1. Enable GitHub Pages
+
+From the repository on GitHub:
+
+1. Open the repository **Settings**.
+2. In the left sidebar, select **Pages**.
+3. Under **Build and deployment → Source**, choose **Deploy from a branch**.
+4. Set **Branch** to **`main`**.
+5. Set the folder to **`/ (root)`** — the landing page lives at the repository root.
+6. Click **Save**.
+
+GitHub then builds and publishes the site. The first deploy usually takes a minute or two.
+
+### 2. Expected URL
+
+Once published, the landing page is available at:
+
+```
+https://rajdeep5901.github.io/Lang-Filter-AI/
+```
+
+The URL follows the `https://<username>.github.io/<repository>/` pattern, so it resolves to the repository owner (`rajdeep5901`) and repository name (`Lang-Filter-AI`).
+
+### 3. ⚠️ Important: the dashboard is NOT hosted online
+
+**GitHub Pages hosts the landing page only.** The interactive dashboard cannot run from the hosted URL, because it is a live view of a backend that must talk to your computer's hardware.
+
+To actually use the dashboard you **have to clone the repository and run the server on your own machine**:
+
+```bash
+git clone https://github.com/rajdeep5901/Lang-Filter-AI.git
+cd Lang-Filter-AI
+python server.py
+```
+
+Then open `http://localhost:5000/dashboard`.
+
+This local step is **required** — not optional. The dashboard connects to your **local hardware (microphone and speakers)** through the Flask backend in `server.py`, which captures live audio, runs Whisper language detection, and streams the filtered result back out. GitHub Pages serves only static files; it cannot access a microphone, run Python, or reach the audio pipeline. The browser dashboard polls the backend at `window.location.origin`, so it only works when it is served from the local server you started with `python server.py`. In short: **the landing page lives online, but the working dashboard always runs locally.**
+
+### 4. Verify the deployment
+
+- **Landing page (online):** Open `https://rajdeep5901.github.io/Lang-Filter-AI/` in a browser. The neon landing page should load with its styling, animations, and images intact. In the repository, **Settings → Pages** shows a green “Your site is live at …” banner, and the **Deployments** section / **github-pages** environment in the repo's main page records a successful publish.
+- **Dashboard (local):** Run `python server.py`, open `http://localhost:5000/dashboard`, and confirm the header status indicator reads **API Connected**. If it shows **API Disconnected**, the local server is not running — the hosted URL will never show a connected dashboard by design.
 
 ---
 
