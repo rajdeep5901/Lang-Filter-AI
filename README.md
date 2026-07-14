@@ -328,7 +328,7 @@ gantt
     section Hardware
     Raspberry Pi branch                  :done, h1, 2026-05-26, 20d
     section Frontend
-    UI overhaul: landing and dashboard   :done, u1, 2026-07-01, 2026-07-13
+    UI overhaul - landing and dashboard  :done, u1, 2026-07-01, 2026-07-13
 ```
 
 ---
