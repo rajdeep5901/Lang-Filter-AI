@@ -289,7 +289,7 @@ sequenceDiagram
 
 6. **Open the app**
 
-   Visit `http://localhost:5000` for the landing page, then `http://localhost:5000/dashboard` for the live dashboard.
+   The landing page is hosted online at `https://rajdeep5901.github.io/Lang-Filter-AI/` — no local server required to view it. To use the live dashboard, keep the server running and open `http://localhost:5000/dashboard` locally, since it needs the Flask backend and your microphone.
 
 ---
 
