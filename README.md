@@ -143,6 +143,33 @@ flowchart LR
 
 ---
 
+## 🔌 Hardware Setup
+
+Beyond running on a laptop or desktop, LangFilterAI is designed to operate as a self-contained appliance on a Raspberry Pi, so the filter can run without a host computer. The reference setup used during development on the `raspberry-pi` branch is shown in the photograph below.
+
+The physical connections are straightforward and use only the ports built into the board:
+
+- **Power** — A 5V USB-C power supply feeds the Raspberry Pi and boots it directly into the audio pipeline.
+- **Audio input** — A USB gooseneck microphone plugs into one of the Pi's USB-A ports and acts as the live capture device. Because it is a USB audio device, it is recognised by the system without additional drivers or a separate sound card.
+- **Audio output** — A pair of wired earphones connects to the Pi's 3.5 mm headphone jack and plays back the filtered result. Headphones are preferred over open speakers so that the output cannot loop back into the microphone and trigger false detections.
+
+Once powered on, the Pi launches the Flask backend and the producer–consumer audio pipeline automatically. Audio captured from the USB microphone is transcribed, matched against the target language, and either passed through or faded to silence before it reaches the earphones — the entire detection loop runs locally on the board.
+
+```mermaid
+flowchart LR
+    PWR([5V USB-C Power Supply]):::pwr --> PI[Raspberry Pi 4]:::proc
+    MIC([USB Gooseneck Microphone]):::io -- USB-A --> PI
+    PI -- 3.5 mm audio jack --> OUT([Wired Earphones]):::io
+
+    classDef io fill:#0e1016,stroke:#22d3ee,color:#e6faff,stroke-width:2px
+    classDef proc fill:#0e1016,stroke:#a855f7,color:#f3e9ff,stroke-width:2px
+    classDef pwr fill:#0e1016,stroke:#eab308,color:#fff8e0,stroke-width:2px
+```
+
+![LangFilterAI Raspberry Pi hardware setup](screenshots/WhatsApp%20Image%202026-05-27%20at%2013.24.38%20%281%29.jpeg)
+
+---
+
 ## 🧵 Threading Architecture
 
 The backend is a producer–consumer pipeline: audio flows through queues between independent worker threads, so slow Whisper inference never blocks capture or playback. The Flask server reads a shared status object and serves it to the browser dashboard.
